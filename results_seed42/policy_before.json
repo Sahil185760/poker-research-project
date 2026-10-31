@@ -1,0 +1,6 @@
+{
+  "algorithm": "first-visit Monte Carlo control",
+  "entries": [],
+  "gamma": 1,
+  "update_count": 0
+}

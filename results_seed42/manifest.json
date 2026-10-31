@@ -1,0 +1,12 @@
+{
+  "algorithm_version": "1.0",
+  "files": {
+    "hands.jsonl": "3f14f5acf28555fde03c4e697a7a0bfc18f395b999b174b9865e8b7b224e2d98",
+    "policy_after.json": "3f87750adf66f279fffeaa0ae6238468d2186f04bbb5537261c98281431fef76",
+    "policy_before.json": "b5096ede8fc15ac9570b55c01e0a85549759ad9138bf8767170cd51dd770cec5",
+    "rounds.csv": "edd325be20bae4b30537ad3fcf20da3872b1a7ce2a83e232a5559a975bb3b4c0",
+    "summary.json": "6c7a6564c02a5040c3bab01bd64fdb8ad82b2220c5fdc09b11be67b11590c128"
+  },
+  "python": "3.9.6 (default, Dec  2 2025, 07:27:58) \n[Clang 17.0.0 (clang-1700.6.3.2)]",
+  "source_sha256": "8efcf9e3e2431bd6a00d3c9ee03dc81736f4d4631a60d0e8da5f3ccf4f8e46cd"
+}
