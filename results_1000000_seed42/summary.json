@@ -1,0 +1,131 @@
+{
+  "algorithm_version": "1.1",
+  "before_after_comparison": {
+    "bootstrap_percentile_95_interval": [
+      30.354166666666682,
+      226.0708333333333
+    ],
+    "bootstrap_resamples": 5000,
+    "mean_change_net_bb_per_10": 126.66666666666669,
+    "p_value": null,
+    "paired_unit": "evaluation round; same deal seeds before and after",
+    "rounds": 50,
+    "scope": "Conditional on this one training run and opponent. Does not estimate variability across training seeds."
+  },
+  "config": {
+    "baseline": "random",
+    "big_blind": 1000,
+    "bootstrap_samples": 5000,
+    "epsilon_end": 0.05,
+    "epsilon_start": 0.3,
+    "equity_samples": 64,
+    "hands_per_round": 3,
+    "rounds": 50,
+    "seed": 42,
+    "stack": 100000,
+    "training_hands": 1000000
+  },
+  "learning": {
+    "evaluation_policy_frozen": true,
+    "initial_policy_sha256": "8f59b0ea290cce23d44becc5bb519d4bfb5a2890752b3c058a7c8e5989f79afc",
+    "method": "local first-visit Monte Carlo control",
+    "trained_policy_sha256": "c85b54d078a73ac5b04882f6f170b8511f73bb49134d883f7813891d45593d13",
+    "updated_state_action_pairs": 2732,
+    "updates": 2216686
+  },
+  "phases": {
+    "after": {
+      "agent": {
+        "aggressive_actions": 135,
+        "decisions": 366,
+        "hand_win_percent": 54.666666666666664,
+        "hands": 150,
+        "hands_tied": 4,
+        "hands_with_low_equity_aggression": 26,
+        "hands_won": 82,
+        "low_equity_aggression_per_decision_percent": 12.568306010928962,
+        "low_equity_bets_or_raises": 46,
+        "low_equity_share_of_aggressive_actions_percent": 34.074074074074076,
+        "net_bb_per_10": 76.56666666666666,
+        "net_chips": 1148500
+      },
+      "bankruptcy_rebuys": 34,
+      "baseline": {
+        "aggressive_actions": 198,
+        "decisions": 326,
+        "hand_win_percent": 42.666666666666664,
+        "hands": 150,
+        "hands_tied": 4,
+        "hands_with_low_equity_aggression": 49,
+        "hands_won": 64,
+        "low_equity_aggression_per_decision_percent": 19.32515337423313,
+        "low_equity_bets_or_raises": 63,
+        "low_equity_share_of_aggressive_actions_percent": 31.818181818181817,
+        "net_bb_per_10": -76.56666666666666,
+        "net_chips": -1148500
+      }
+    },
+    "before": {
+      "agent": {
+        "aggressive_actions": 135,
+        "decisions": 241,
+        "hand_win_percent": 45.333333333333336,
+        "hands": 150,
+        "hands_tied": 3,
+        "hands_with_low_equity_aggression": 23,
+        "hands_won": 68,
+        "low_equity_aggression_per_decision_percent": 14.107883817427386,
+        "low_equity_bets_or_raises": 34,
+        "low_equity_share_of_aggressive_actions_percent": 25.185185185185187,
+        "net_bb_per_10": -50.1,
+        "net_chips": -751500
+      },
+      "bankruptcy_rebuys": 15,
+      "baseline": {
+        "aggressive_actions": 127,
+        "decisions": 247,
+        "hand_win_percent": 52.666666666666664,
+        "hands": 150,
+        "hands_tied": 3,
+        "hands_with_low_equity_aggression": 19,
+        "hands_won": 79,
+        "low_equity_aggression_per_decision_percent": 8.502024291497976,
+        "low_equity_bets_or_raises": 21,
+        "low_equity_share_of_aggressive_actions_percent": 16.53543307086614,
+        "net_bb_per_10": 50.1,
+        "net_chips": 751500
+      }
+    },
+    "training": {
+      "agent": {
+        "aggressive_actions": 958832,
+        "decisions": 2339819,
+        "hand_win_percent": 56.6215,
+        "hands": 1000000,
+        "hands_tied": 14439,
+        "hands_with_low_equity_aggression": 142161,
+        "hands_won": 566215,
+        "low_equity_aggression_per_decision_percent": 8.761532409130792,
+        "low_equity_bets_or_raises": 205004,
+        "low_equity_share_of_aggressive_actions_percent": 21.38059639227727,
+        "net_bb_per_10": 64.934665,
+        "net_chips": 6493466500
+      },
+      "bankruptcy_rebuys": 209879,
+      "baseline": {
+        "aggressive_actions": 1267129,
+        "decisions": 2136172,
+        "hand_win_percent": 41.9346,
+        "hands": 1000000,
+        "hands_tied": 14439,
+        "hands_with_low_equity_aggression": 253299,
+        "hands_won": 419346,
+        "low_equity_aggression_per_decision_percent": 17.070956833064002,
+        "low_equity_bets_or_raises": 364665,
+        "low_equity_share_of_aggressive_actions_percent": 28.778837829455405,
+        "net_bb_per_10": -64.934665,
+        "net_chips": -6493466500
+      }
+    }
+  }
+}

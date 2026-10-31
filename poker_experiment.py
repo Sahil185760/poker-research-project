@@ -1,7 +1,7 @@
 """Local heads-up Hold'em experiment with first-visit Monte Carlo control.
 
 All results are measured from dealt hands; no target statistics are supplied.
-Python 3.11+, standard library only.
+Python 3.9+, standard library only.
 """
 from __future__ import annotations
 
@@ -10,6 +10,9 @@ from collections import Counter
 import csv
 from dataclasses import asdict, dataclass
 import hashlib
+import gzip
+import io
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import random
@@ -18,7 +21,10 @@ import sys
 
 DECK = tuple(range(52))
 STREETS = ('preflop', 'flop', 'turn', 'river')
-ALGORITHM_VERSION = '1.0'
+ALGORITHM_VERSION = '1.1'
+COMPRESS_AT_HANDS = 100000
+LOG_SHARD_HANDS = 100000
+EQUITY_CACHE_LIMIT = 100000
 
 
 def card_text(card: int) -> str:
@@ -89,6 +95,8 @@ class EquityEstimator:
             own, other = hand_rank(list(hole)+final), hand_rank(draw[:2]+final)
             score += 1 if own > other else .5 if own == other else 0
         value = score / self.samples
+        if len(self.cache) >= EQUITY_CACHE_LIMIT:
+            self.cache.clear()
         self.cache[key] = value
         return value
 
@@ -96,7 +104,7 @@ class EquityEstimator:
 @dataclass(frozen=True)
 class Config:
     seed: int = 42
-    training_hands: int = 1000
+    training_hands: int = 1000000
     rounds: int = 50
     hands_per_round: int = 3
     stack: int = 100000
@@ -414,6 +422,62 @@ def paired_change(rounds, config):
             'scope':'Conditional on this one training run and opponent. Does not estimate variability across training seeds.'}
 
 
+def sha_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as handle:
+        for block in iter(lambda: handle.read(1024*1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+class MetricTotals:
+    """Accumulate exactly the same counts as metrics without retaining hands."""
+    def __init__(self, bb, seat):
+        self.bb, self.seat, self.counts = bb, seat, Counter()
+    def add(self, hand):
+        c, seat = self.counts, self.seat
+        acts = [a for a in hand['actions'] if a['actor'] == seat]
+        c['hands'] += 1
+        c['decisions'] += len(acts)
+        c['low_equity_bets_or_raises'] += sum(a['low_equity_aggression'] for a in acts)
+        c['aggressive_actions'] += sum(a['action'].startswith('raise') or a['action']=='all_in' for a in acts)
+        c['hands_with_low_equity_aggression'] += any(a['low_equity_aggression'] for a in acts)
+        c['net_chips'] += hand['net_chips'][seat]
+        c['hands_won'] += hand['winner'] == seat
+        c['hands_tied'] += hand['winner'] is None
+    def result(self):
+        c = self.counts
+        result = {k:c[k] for k in ('hands','decisions','low_equity_bets_or_raises',
+                  'aggressive_actions','hands_with_low_equity_aggression','net_chips','hands_won','hands_tied')}
+        result.update(low_equity_aggression_per_decision_percent=100*c['low_equity_bets_or_raises']/c['decisions'] if c['decisions'] else None,
+          low_equity_share_of_aggressive_actions_percent=100*c['low_equity_bets_or_raises']/c['aggressive_actions'] if c['aggressive_actions'] else None,
+          net_bb_per_10=10*c['net_chips']/(self.bb*c['hands']),
+          hand_win_percent=100*c['hands_won']/c['hands'])
+        return result
+
+
+def open_text(path, mode):
+    path = Path(path)
+    if path.suffix == '.gz':
+        if mode == 'w':
+            # Fixed header avoids timestamps or local paths in reproducible archives.
+            return io.TextIOWrapper(gzip.GzipFile(filename='', mode='wb', fileobj=path.open('wb'),mtime=0),encoding='utf-8',newline='')
+        return gzip.open(path,'rt',encoding='utf-8',newline='')
+    return path.open(mode,encoding='utf-8',newline='')
+
+
+def hand_files(output):
+    output = Path(output)
+    return [output/'hands.jsonl'] if (output/'hands.jsonl').exists() else sorted(output.glob('hands-*.jsonl.gz'))
+
+
+def read_hands(output):
+    for path in hand_files(output):
+        with open_text(path,'r') as handle:
+            for line in handle:
+                yield json.loads(line)
+
+
 def run_experiment(config, output):
     config.validate()
     output = Path(output)
@@ -422,172 +486,175 @@ def run_experiment(config, output):
         raise ValueError('Output directory must be empty; choose a new path to preserve earlier runs')
     learner, baseline = Agent(), Agent(config.baseline)
     estimator = EquityEstimator(config.seed,config.equity_samples)
-    histories = []
-    initial_digest = learner.digest()
-    initial_policy = learner.snapshot()
-    def phase(name, count, training):
-        stacks = [config.stack,config.stack]
-        for i in range(count):
-            round_id, slot = divmod(i,config.hands_per_round)
-            reset_reason = 'none'
-            if slot == 0:
-                stacks = [config.stack,config.stack]
-                reset_reason = 'round_start'
-            elif min(stacks) == 0:
-                stacks = [config.stack,config.stack]
-                reset_reason = 'bankruptcy_rebuy'
-            stream = 'train' if training else 'eval'
-            deal_seed = seed_for(config.seed,stream,'deal',i)
-            action_seed = seed_for(config.seed,stream,'policy',i)
-            button = i%2
-            deal = Deal.from_seed(deal_seed,button)
-            fraction = i/max(1,count-1)
-            eps = config.epsilon_start+(config.epsilon_end-config.epsilon_start)*fraction if training else 0
-            history = play_hand([learner,baseline],stacks,button,deal,estimator,config,
-                                action_seed,eps,training,
-                                {'phase':name,'round':round_id+1,'hand':slot+1,
-                                 'deal_seed':str(deal_seed),'action_seed':str(action_seed),
-                                 'reset_reason':reset_reason,'training_epsilon':eps})
-            histories.append(history)
-            if (i+1)%100 == 0:
-                print(f'{name}: {i+1}/{count} hands',file=sys.stderr,flush=True)
-    n_eval = config.rounds*config.hands_per_round
-    phase('before',n_eval,False)
-    if learner.digest() != initial_digest:
-        raise AssertionError('Pre-training evaluation modified policy')
-    phase('training',config.training_hands,True)
-    trained_policy = learner.snapshot()
-    trained_digest = learner.digest()
-    phase('after',n_eval,False)
-    if learner.digest() != trained_digest:
-        raise AssertionError('Evaluation modified trained policy')
-    rounds = round_rows(histories,config.big_blind)
+    evaluation_rounds = []
+    initial_digest, initial_policy = learner.digest(), learner.snapshot()
+    totals, rebuys = {}, Counter()
+    large = config.training_hands >= COMPRESS_AT_HANDS
+    with ExitStack() as context:
+        csvfile = context.enter_context(open_text(output/('rounds.csv.gz' if large else 'rounds.csv'),'w'))
+        writer = None
+        log = None
+        logged = 0
+        def save(history):
+            nonlocal log, logged
+            if log is None or (large and logged % LOG_SHARD_HANDS == 0):
+                if log is not None:log.close()
+                filename = f'hands-{logged//LOG_SHARD_HANDS:05d}.jsonl.gz' if large else 'hands.jsonl'
+                log = context.enter_context(open_text(output/filename,'w'))
+            log.write(json.dumps(history,separators=(',',':'))+'\n')
+            logged += 1
+        def save_round(group):
+            nonlocal writer
+            row = round_rows(group,config.big_blind)[0]
+            if writer is None:
+                writer = csv.DictWriter(csvfile,fieldnames=row.keys())
+                writer.writeheader()
+            writer.writerow(row)
+            if row['phase'] != 'training':evaluation_rounds.append(row)
+        def phase(name,count,training):
+            stacks = [config.stack,config.stack]
+            group = []
+            totals[name] = [MetricTotals(config.big_blind,seat) for seat in (0,1)]
+            for i in range(count):
+                round_id, slot = divmod(i,config.hands_per_round)
+                reset_reason = 'none'
+                if slot == 0:
+                    if group:save_round(group);group=[]
+                    stacks = [config.stack,config.stack]
+                    reset_reason = 'round_start'
+                elif min(stacks) == 0:
+                    stacks = [config.stack,config.stack]
+                    reset_reason = 'bankruptcy_rebuy'
+                stream = 'train' if training else 'eval'
+                ds = seed_for(config.seed,stream,'deal',i)
+                ps = seed_for(config.seed,stream,'policy',i)
+                button = i%2
+                eps = config.epsilon_start+(config.epsilon_end-config.epsilon_start)*i/max(1,count-1) if training else 0
+                history = play_hand([learner,baseline],stacks,button,Deal.from_seed(ds,button),estimator,config,ps,eps,training,
+                     {'phase':name,'round':round_id+1,'hand':slot+1,'deal_seed':str(ds),'action_seed':str(ps),
+                      'reset_reason':reset_reason,'training_epsilon':eps})
+                group.append(history);save(history)
+                for accumulator in totals[name]:accumulator.add(history)
+                rebuys[name] += reset_reason == 'bankruptcy_rebuy'
+                if (i+1)%1000 == 0 or i+1==count:
+                    print(f'{name}: {i+1}/{count} hands',file=sys.stderr,flush=True)
+            if group:save_round(group)
+        n_eval = config.rounds*config.hands_per_round
+        phase('before',n_eval,False)
+        if learner.digest()!=initial_digest:raise AssertionError('Pre-training evaluation modified policy')
+        phase('training',config.training_hands,True)
+        trained_policy, trained_digest = learner.snapshot(), learner.digest()
+        phase('after',n_eval,False)
+        if learner.digest()!=trained_digest:raise AssertionError('Evaluation modified trained policy')
     summary = {'algorithm_version':ALGORITHM_VERSION,'config':asdict(config),
-               'learning':{'method':'local first-visit Monte Carlo control',
-                           'initial_policy_sha256':initial_digest,
-                           'trained_policy_sha256':trained_digest,
-                           'updated_state_action_pairs':len(learner.q),
-                           'updates':learner.update_count,
-                           'evaluation_policy_frozen':True},
-               'phases':{},'before_after_comparison':paired_change(rounds,config)}
-    for phase_name in ('before','training','after'):
-        group = [h for h in histories if h['phase']==phase_name]
-        summary['phases'][phase_name] = {
-            'agent':metrics(group,config.big_blind,0),
-            'baseline':metrics(group,config.big_blind,1),
-            'bankruptcy_rebuys':sum(h['reset_reason']=='bankruptcy_rebuy' for h in group)}
-    # Auditable logs are the source; summaries are calculated from those logs.
-    with (output/'hands.jsonl').open('w') as handle:
-        for h in histories:
-            handle.write(json.dumps(h,separators=(',',':'))+'\n')
-    with (output/'rounds.csv').open('w',newline='') as handle:
-        writer = csv.DictWriter(handle,fieldnames=rounds[0].keys())
-        writer.writeheader()
-        writer.writerows(rounds)
-    for filename,data in (('policy_before.json',initial_policy),('policy_after.json',trained_policy),
-                          ('summary.json',summary)):
+        'learning':{'method':'local first-visit Monte Carlo control',
+          'initial_policy_sha256':initial_digest,'trained_policy_sha256':trained_digest,
+          'updated_state_action_pairs':len(learner.q),'updates':learner.update_count,
+          'evaluation_policy_frozen':True},'phases':{},
+        'before_after_comparison':paired_change(evaluation_rounds,config)}
+    for name, accumulators in totals.items():
+        summary['phases'][name] = {'agent':accumulators[0].result(),
+             'baseline':accumulators[1].result(),'bankruptcy_rebuys':rebuys[name]}
+    for filename,data in (('policy_before.json',initial_policy),('policy_after.json',trained_policy),('summary.json',summary)):
         (output/filename).write_text(json.dumps(data,indent=2,sort_keys=True)+'\n')
-    source_sha = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     manifest = {'algorithm_version':ALGORITHM_VERSION,'python':sys.version,
-                'source_sha256':source_sha,
-                'files':{p.name:hashlib.sha256(p.read_bytes()).hexdigest()
-                         for p in sorted(output.iterdir()) if p.is_file()}}
+        'source_sha256':sha_file(__file__),
+        'files':{p.name:sha_file(p) for p in sorted(output.iterdir()) if p.is_file()}}
     (output/'manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
     return summary
 
 
-def audit_run(output):
-    """Recalculate measures and replay every hand against saved policy checkpoints."""
+def audit_run(output, replay=True):
+    """Stream all records; optionally replay the entire game and equity computation."""
     output = Path(output)
     summary = json.loads((output/'summary.json').read_text())
     config = Config(**summary['config'])
     manifest = json.loads((output/'manifest.json').read_text())
-    if hashlib.sha256(Path(__file__).read_bytes()).hexdigest() != manifest['source_sha256']:
+    if sha_file(__file__) != manifest['source_sha256']:
         raise AssertionError('Simulator source differs from recorded run')
     for name,digest in manifest['files'].items():
-        if hashlib.sha256((output/name).read_bytes()).hexdigest() != digest:
-            raise AssertionError(f'File checksum mismatch: {name}')
-    original = [json.loads(line) for line in (output/'hands.jsonl').read_text().splitlines()]
-    learner, baseline = Agent(),Agent(config.baseline)
+        if sha_file(output/name) != digest:raise AssertionError(f'File checksum mismatch: {name}')
+    learner,baseline = Agent(),Agent(config.baseline)
     estimator = EquityEstimator(config.seed,config.equity_samples)
-    stacks = None
-    phase_counts = Counter()
-    for h in original:
-        name = h['phase']
-        i = phase_counts[name]
-        if i == 0:
-            if name == 'training' and learner.digest() != summary['learning']['initial_policy_sha256']:
-                raise AssertionError('Initial policy changed')
-            if name == 'after' and learner.digest() != summary['learning']['trained_policy_sha256']:
+    phase_counts, rebuys = Counter(),Counter()
+    totals = {n:[MetricTotals(config.big_blind,s) for s in (0,1)] for n in ('before','training','after')}
+    group, evaluation_rounds = [],[]
+    csvpath = output/('rounds.csv.gz' if (output/'rounds.csv.gz').exists() else 'rounds.csv')
+    with open_text(csvpath,'r') as csvfile:
+        saved = iter(csv.DictReader(csvfile))
+        def verify_round():
+            row = round_rows(group,config.big_blind)[0]
+            expected = {k:'' if v is None else str(v) for k,v in row.items()}
+            if next(saved,None)!=expected:raise AssertionError('Round CSV mismatch')
+            if row['phase']!='training':evaluation_rounds.append(row)
+        for h in read_hands(output):
+            name = h['phase'];i=phase_counts[name]
+            if group and (name, h['round']) != (group[0]['phase'],group[0]['round']):
+                verify_round();group=[]
+            if i==0 and name=='after' and learner.digest()!=summary['learning']['trained_policy_sha256']:
                 raise AssertionError('Trained policy checkpoint mismatch')
-        if i%config.hands_per_round == 0:
-            stacks = [config.stack,config.stack]
-        elif min(stacks) == 0:
-            stacks = [config.stack,config.stack]
-        if stacks != h['starting_stacks']:
-            raise AssertionError('Starting stacks do not follow reset rule')
-        stream = 'train' if name == 'training' else 'eval'
-        ds = seed_for(config.seed,stream,'deal',i)
-        ps = seed_for(config.seed,stream,'policy',i)
-        total_hands = config.training_hands if name == 'training' else config.rounds*config.hands_per_round
-        epsilon = (config.epsilon_start+(config.epsilon_end-config.epsilon_start)*i/max(1,total_hands-1)
-                   if name == 'training' else 0)
-        reset = ('round_start' if i%config.hands_per_round == 0 else
-                 'bankruptcy_rebuy' if min(previous_ending) == 0 else 'none')
-        metadata = {'phase':name,'round':i//config.hands_per_round+1,
-                    'hand':i%config.hands_per_round+1,'deal_seed':str(ds),
-                    'action_seed':str(ps),'reset_reason':reset,'training_epsilon':epsilon}
-        if any(h[k] != v for k,v in metadata.items()):
-            raise AssertionError('Hand metadata mismatch')
-        if str(ds) != h['deal_seed'] or str(ps) != h['action_seed']:
-            raise AssertionError('Seed mismatch')
-        result = play_hand([learner,baseline],stacks,i%2,Deal.from_seed(ds,i%2),estimator,
-                           config,ps,h['training_epsilon'],name=='training',metadata)
-        if json.loads(json.dumps(result)) != h:
-            raise AssertionError(f'Hand replay mismatch: {name} #{i+1}')
-        previous_ending = stacks.copy()
-        phase_counts[name] += 1
-    expected = {'before':config.rounds*config.hands_per_round,
-                'training':config.training_hands,'after':config.rounds*config.hands_per_round}
-    if dict(phase_counts) != expected:
-        raise AssertionError('Hand counts mismatch')
-    for name in expected:
+            if i%config.hands_per_round==0:
+                stacks=[config.stack,config.stack];reset='round_start'
+            elif min(previous_ending)==0:
+                stacks=[config.stack,config.stack];reset='bankruptcy_rebuy'
+            else:stacks=previous_ending.copy();reset='none'
+            stream='train' if name=='training' else 'eval'
+            ds=seed_for(config.seed,stream,'deal',i);ps=seed_for(config.seed,stream,'policy',i)
+            total_hands=config.training_hands if name=='training' else config.rounds*config.hands_per_round
+            epsilon=config.epsilon_start+(config.epsilon_end-config.epsilon_start)*i/max(1,total_hands-1) if name=='training' else 0
+            metadata={'phase':name,'round':i//config.hands_per_round+1,'hand':i%config.hands_per_round+1,
+                      'deal_seed':str(ds),'action_seed':str(ps),'reset_reason':reset,'training_epsilon':epsilon}
+            if any(h[k]!=v for k,v in metadata.items()) or stacks!=h['starting_stacks']:
+                raise AssertionError('Hand metadata or starting stacks mismatch')
+            if replay:
+                result=play_hand([learner,baseline],stacks,i%2,Deal.from_seed(ds,i%2),estimator,config,ps,epsilon,name=='training',metadata)
+                if json.loads(json.dumps(result))!=h:raise AssertionError(f'Hand replay mismatch: {name} #{i+1}')
+            else:
+                if sum(h['net_chips'])!=0 or any(h['ending_stacks'][s]-stacks[s]!=h['net_chips'][s] for s in (0,1)):
+                    raise AssertionError('Net chip accounting mismatch')
+                trace=[]
+                for act in h['actions']:
+                    if act['action'] not in act['legal_actions'] or act['legal_actions'][act['action']]!=act['chips_added']:
+                        raise AssertionError('Recorded legal action mismatch')
+                    expected_low=(act['action'].startswith('raise') or act['action']=='all_in') and act['estimated_equity']<.40
+                    if act['low_equity_aggression']!=expected_low:raise AssertionError('Frequency classification mismatch')
+                    if act['actor']==0:trace.append((tuple(tuple(x) if isinstance(x,list) else x for x in act['state']),act['action']))
+                if name=='training':learner.learn(trace,h['net_chips'][0]/config.big_blind)
+            previous_ending=h['ending_stacks']
+            group.append(h);phase_counts[name]+=1;rebuys[name]+=reset=='bankruptcy_rebuy'
+            for accumulator in totals[name]:accumulator.add(h)
+        if group:verify_round()
+        if next(saved,None) is not None:raise AssertionError('Extra CSV rows')
+    expected_counts={'before':config.rounds*config.hands_per_round,'training':config.training_hands,'after':config.rounds*config.hands_per_round}
+    if dict(phase_counts)!=expected_counts:raise AssertionError('Hand counts mismatch')
+    for name in expected_counts:
         for seat,label in ((0,'agent'),(1,'baseline')):
-            if metrics([h for h in original if h['phase']==name],config.big_blind,seat) != summary['phases'][name][label]:
-                raise AssertionError('Aggregate metric mismatch')
-    derived_rounds = round_rows(original,config.big_blind)
-    with (output/'rounds.csv').open(newline='') as handle:
-        saved = list(csv.DictReader(handle))
-    expected_rounds = [{k:'' if v is None else str(v) for k,v in r.items()} for r in derived_rounds]
-    if saved != expected_rounds:
-        raise AssertionError('Round CSV mismatch')
-    if paired_change(derived_rounds,config) != summary['before_after_comparison']:
-        raise AssertionError('Paired comparison mismatch')
-    if learner.digest() != summary['learning']['trained_policy_sha256']:
-        raise AssertionError('Evaluation modified policy')
-    if learner.snapshot() != json.loads((output/'policy_after.json').read_text()):
-        # JSON turns state tuples into lists; compare canonical serialization.
-        if json.loads(json.dumps(learner.snapshot())) != json.loads((output/'policy_after.json').read_text()):
-            raise AssertionError('Saved final policy differs from learned policy')
-    if json.loads((output/'policy_before.json').read_text()) != Agent().snapshot():
-        raise AssertionError('Saved initial policy differs from untrained policy')
-    print(f'Audit passed: replayed {len(original)} hands; verified actions, chips, policies and summaries.')
+            if totals[name][seat].result()!=summary['phases'][name][label]:raise AssertionError('Aggregate metric mismatch')
+        if rebuys[name]!=summary['phases'][name]['bankruptcy_rebuys']:raise AssertionError('Rebuy mismatch')
+    if paired_change(evaluation_rounds,config)!=summary['before_after_comparison']:raise AssertionError('Paired comparison mismatch')
+    if learner.digest()!=summary['learning']['trained_policy_sha256']:raise AssertionError('Final policy mismatch')
+    if learner.update_count!=summary['learning']['updates']:raise AssertionError('Update count mismatch')
+    if json.loads(json.dumps(learner.snapshot()))!=json.loads((output/'policy_after.json').read_text()):raise AssertionError('Saved policy mismatch')
+    if json.loads((output/'policy_before.json').read_text())!=Agent().snapshot():raise AssertionError('Initial policy mismatch')
+    verb = 'replayed' if replay else 'checked recorded'
+    print(f'Audit passed: {verb} {sum(phase_counts.values())} hands; verified chips, learning and summaries.')
     return summary
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--seed',type=int,default=42)
-    parser.add_argument('--training-hands',type=int,default=1000)
+    parser.add_argument('--training-hands',type=int,default=1000000)
     parser.add_argument('--rounds',type=int,default=50)
     parser.add_argument('--hands-per-round',type=int,default=3)
     parser.add_argument('--equity-samples',type=int,default=64)
     parser.add_argument('--baseline',choices=('random','rules'),default='random')
     parser.add_argument('--output',type=Path,default=Path('results'))
     parser.add_argument('--audit',type=Path,help='Replay and verify a completed run directory')
+    parser.add_argument('--records-only',action='store_true',help='Audit recorded chips, counts and learning without replaying card/equity computation')
     args = parser.parse_args()
     if args.audit:
-        audit_run(args.audit)
+        audit_run(args.audit,replay=not args.records_only)
         return
     config = Config(seed=args.seed,training_hands=args.training_hands,rounds=args.rounds,
                     hands_per_round=args.hands_per_round,equity_samples=args.equity_samples,

@@ -8,6 +8,8 @@ from pathlib import Path
 import random
 import tempfile
 import unittest
+from unittest.mock import patch
+import gzip
 
 from poker_experiment import (Agent, Config, Deal, EquityEstimator, audit_run,
                              hand_rank, legal_actions, metrics, play_hand,
@@ -231,6 +233,30 @@ class PokerTests(unittest.TestCase):
                 f.write('\n')
             with self.assertRaisesRegex(AssertionError,'checksum'):
                 audit_run(first)
+
+    def test_streamed_compressed_shards_match_plain_run(self):
+        config = Config(training_hands=23,rounds=3,equity_samples=4,bootstrap_samples=100)
+        with tempfile.TemporaryDirectory() as tmp:
+            plain,compressed = Path(tmp)/'plain',Path(tmp)/'compressed'
+            with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                expected = run_experiment(config,plain)
+                with patch('poker_experiment.COMPRESS_AT_HANDS',1),patch('poker_experiment.LOG_SHARD_HANDS',7):
+                    actual = run_experiment(config,compressed)
+                self.assertEqual(actual,expected)
+                self.assertGreater(len(list(compressed.glob('hands-*.jsonl.gz'))),1)
+                self.assertEqual(audit_run(compressed),expected)
+                self.assertEqual(audit_run(compressed,replay=False),expected)
+            joined = ''.join(gzip.open(p,'rt').read() for p in sorted(compressed.glob('hands-*.jsonl.gz')))
+            self.assertEqual(joined,(plain/'hands.jsonl').read_text())
+            self.assertEqual(gzip.open(compressed/'rounds.csv.gz','rt').read(),(plain/'rounds.csv').read_text())
+
+    def test_equity_cache_eviction_preserves_values(self):
+        with patch('poker_experiment.EQUITY_CACHE_LIMIT',1):
+            e = EquityEstimator(42,4)
+            original = e.estimate(cards('As Ad'),[])
+            e.estimate(cards('2c 3c'),[])
+            self.assertLessEqual(len(e.cache),1)
+            self.assertEqual(e.estimate(cards('As Ad'),[]),original)
 
 
 if __name__ == '__main__':
