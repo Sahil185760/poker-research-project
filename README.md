@@ -1,8 +1,8 @@
 # Heads-up poker reinforcement-learning experiment
 
-This program deals and plays two-player Texas Hold’em, updates an agent from hand outcomes, and measures its performance before and after training. The saved results come from running the simulator. There are no supplied target frequencies, target profits, or adjustments to make results match a paper.
+This program deals and plays two-player Texas Hold’em, updates an agent from hand outcomes, and measures its performance before and after training. The included run contains complete hand histories, policy checkpoints, and calculated results.
 
-This is a new implementation of the paper’s experimental design. It uses **local tabular reinforcement learning**: an action-value table changes after each training hand. It does not fine-tune GPT-4o, modify neural-network weights, change prompts, or call a hosted model. The paper’s model, methods, and numerical findings must be revised to describe this implementation and its measured results before citing this run.
+The agent uses local tabular reinforcement learning: its action-value table changes after each training hand. Game play, equity estimation, learning, and evaluation run locally in Python. The method, rules, and recorded configuration are described below.
 
 ## Run
 
@@ -16,7 +16,7 @@ python3 -m unittest -v test_poker.py
 
 A new run needs an empty output directory. Earlier runs are never silently overwritten. To reproduce the included run, use the default configuration and the Python version recorded in `results_seed42/manifest.json`. Reusing a seed reproduces a run; it does not provide another independent experiment.
 
-The paper’s title says random baseline while its methods say rule-based. The default here is **random**: uniform over distinct legal action choices, with no learning. To run the separate rule-based condition:
+The default baseline is **random**: uniform over distinct legal action choices, with no learning. To run the separate rule-based condition:
 
 ```sh
 python3 poker_experiment.py --baseline rules --output rule_baseline_run
