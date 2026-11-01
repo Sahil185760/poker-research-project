@@ -4,6 +4,10 @@ This program deals and plays two-player Texas Hold’em, updates an agent from h
 
 The agent uses local tabular reinforcement learning: its action-value table changes after each training hand. Game play, equity estimation, learning, and evaluation run locally in Python. The method, rules, and recorded configuration are described below.
 
+## Paper
+
+The revised paper (version 2), reporting the 1,000,000-training-hand experiment, is available on [Zenodo](https://doi.org/10.5281/zenodo.23863357). This repository contains the supporting simulator and recorded run data.
+
 ## Run
 
 Python 3.9 or later; no external packages or API keys are required. From this directory:
